@@ -58,9 +58,16 @@ async function loadMarketsCloud(){
     if(error||!data)return;
     let changed=false;
     data.forEach(row=>{
-      const v=vendors.find(x=>x.id===row.vendor_id);
-      if(v&&typeof row.lat==='number'&&typeof row.lng==='number'){
-        v.location={lat:row.lat,lng:row.lng};
+      let v=vendors.find(x=>x.id===row.vendor_id);
+      if(!v){
+        // vendedor nuevo (registrado por Google/correo): lo agregamos para que los clientes lo vean
+        v={id:row.vendor_id, company:row.company||'Tienda', market:row.market||'', logo:'🏪', banner:null,
+           location:{lat:(typeof row.lat==='number'?row.lat:LIMA.center[0]), lng:(typeof row.lng==='number'?row.lng:LIMA.center[1])},
+           rating:5, ratings:0, called:false, calls:[], msgs:[]};
+        vendors.push(v); changed=true;
+      }else{
+        if(typeof row.lat==='number'&&typeof row.lng==='number'){ v.location={lat:row.lat,lng:row.lng}; }
+        if(row.company)v.company=row.company;
         if(row.market)v.market=row.market;
         changed=true;
       }
@@ -68,10 +75,62 @@ async function loadMarketsCloud(){
     if(changed&&typeof render==='function')render();
   }catch(e){ /* silencioso */ }
 }
+/* ===== Productos en la nube (tabla products) ===== */
+async function loadProductsCloud(){
+  if(!supabaseReady())return;
+  try{
+    await loadMarketsCloud();                 // asegura que existan los vendedores
+    const c=await ensureSupabase();
+    const {data,error}=await c.from('products').select('*').order('created_at',{ascending:true});
+    if(error||!data)return;
+    // quita los productos de nube cargados antes (evita duplicados)
+    for(let i=products.length-1;i>=0;i--){ if(products[i].cloudId!=null) products.splice(i,1); }
+    data.forEach(row=>{
+      products.push({ id:pid++, cloudId:row.id, v:row.vendor_id, name:row.name,
+        emoji:row.emoji||'📦', img:row.img||null, price:Number(row.price),
+        prev:(row.prev!=null?Number(row.prev):null), cat:row.cat||'otros',
+        desc:row.description||'', sales:row.sales||0 });
+    });
+    if(typeof render==='function')render();
+  }catch(e){ /* silencioso */ }
+}
+async function createCloudProduct(p){
+  if(!supabaseReady())return null;
+  try{
+    const c=await ensureSupabase();
+    const {data,error}=await c.from('products').insert({
+      vendor_id:p.v, name:p.name, emoji:p.emoji||null, img:p.img||null,
+      price:p.price, prev:p.prev, cat:p.cat, description:p.desc||'', sales:p.sales||0
+    }).select('id').single();
+    if(error){console.warn('[products] insert:',error.message);return null;}
+    return data?data.id:null;
+  }catch(e){return null;}
+}
+async function updateCloudProduct(p){
+  if(!supabaseReady()||!p||p.cloudId==null)return;
+  try{
+    const c=await ensureSupabase();
+    await c.from('products').update({
+      name:p.name, emoji:p.emoji||null, img:p.img||null,
+      price:p.price, prev:p.prev, cat:p.cat, description:p.desc||'', sales:p.sales||0
+    }).eq('id',p.cloudId);
+  }catch(e){}
+}
+function syncProduct(id){ const p=products.find(x=>x.id===id); if(p) updateCloudProduct(p); }
+let _prodChannel=null;
+async function subscribeProducts(){
+  if(!supabaseReady()||_prodChannel)return;
+  try{
+    const c=await ensureSupabase();
+    _prodChannel=c.channel('products-all')
+      .on('postgres_changes',{event:'*',schema:'public',table:'products'},()=>{ loadProductsCloud(); })
+      .subscribe();
+  }catch(e){}
+}
 function initSupabase(){
   if(!supabaseReady())return;
   ensureSupabase()
-    .then(()=>{ console.log('[MercApp] Conectado a Supabase'); loadMarketsCloud(); restoreSupabaseSession(); })
+    .then(async ()=>{ console.log('[MercApp] Conectado a Supabase'); await loadMarketsCloud(); await loadProductsCloud(); subscribeProducts(); restoreSupabaseSession(); })
     .catch(err=>console.warn('[MercApp] Supabase no disponible:', err));
 }
 /* ===== Autenticación real (Supabase Auth: correo + Google) ===== */
@@ -339,25 +398,7 @@ const CATEGORIES=[
 function catName(id){const c=CATEGORIES.find(x=>x.id===id);return c?c.name:'Otros';}
 
 let pid=1;
-const products=[
-  {id:pid++,v:1,name:'Fresas',emoji:'🍓',price:8.5,prev:11,cat:'frutas',desc:'Fresas frescas de Huaral, dulces y firmes.',sales:142},
-  {id:pid++,v:1,name:'Mangos',emoji:'🥭',price:6,prev:null,cat:'frutas',desc:'Mango Kent maduro, ideal para jugos.',sales:88},
-  {id:pid++,v:1,name:'Plátanos',emoji:'🍌',price:3.2,prev:4,cat:'frutas',desc:'Plátano de seda, racimo del día.',sales:201},
-  {id:pid++,v:1,name:'Naranjas',emoji:'🍊',price:4,prev:5,cat:'frutas',desc:'Naranja de jugo, dulce y jugosa.',sales:60},
-  {id:pid++,v:2,name:'Brócoli',emoji:'🥦',price:5,prev:null,cat:'verduras',desc:'Brócoli orgánico cosechado esta mañana.',sales:64},
-  {id:pid++,v:2,name:'Zanahoria',emoji:'🥕',price:2.8,prev:3.5,cat:'verduras',desc:'Zanahoria seleccionada, sin pesticidas.',sales:177},
-  {id:pid++,v:2,name:'Tomate',emoji:'🍅',price:4.2,prev:null,cat:'verduras',desc:'Tomate de campo, perfecto para ensaladas.',sales:120},
-  {id:pid++,v:2,name:'Papas',emoji:'🥔',price:2.5,prev:null,cat:'verduras',desc:'Papa blanca de la sierra, saco fresco.',sales:230},
-  {id:pid++,v:2,name:'Cebolla',emoji:'🧅',price:3,prev:null,cat:'verduras',desc:'Cebolla roja arequipeña.',sales:95},
-  {id:pid++,v:3,name:'Lomo de res',emoji:'🥩',price:32,prev:38,cat:'carne',desc:'Lomo fino madurado, corte premium.',sales:54},
-  {id:pid++,v:3,name:'Pollo entero',emoji:'🍗',price:11,prev:null,cat:'carne',desc:'Pollo fresco de granja, beneficiado hoy.',sales:97},
-  {id:pid++,v:3,name:'Pescado fresco',emoji:'🐟',price:16,prev:19,cat:'pescado',desc:'Bonito fresco del día.',sales:41},
-  {id:pid++,v:3,name:'Cerdo',emoji:'🥓',price:15,prev:null,cat:'carne',desc:'Carne de cerdo magra.',sales:33},
-  {id:pid++,v:4,name:'Queso fresco',emoji:'🧀',price:18,prev:22,cat:'lacteos',desc:'Queso fresco artesanal de vaca.',sales:73},
-  {id:pid++,v:4,name:'Yogur natural',emoji:'🥛',price:9,prev:null,cat:'lacteos',desc:'Yogur natural sin azúcar añadida, 1L.',sales:140},
-  {id:pid++,v:4,name:'Leche',emoji:'🥛',price:5,prev:null,cat:'lacteos',desc:'Leche fresca de vaca, 1L.',sales:160},
-  {id:pid++,v:4,name:'Huevos',emoji:'🥚',price:7,prev:8.5,cat:'huevos',desc:'Huevos de corral, docena.',sales:118},
-];
+const products=[];   // el catálogo ahora se carga desde Supabase (tabla products)
 
 /* notificaciones de mensajes no leídos */
 function unreadFor(role,vendorId){
@@ -655,7 +696,7 @@ function prodThumb(p,overlay=''){
   return `<div class="thumb" style="background:${pal(p.id)}">${overlay}${p.emoji}</div>`;
 }
 function productCard(p,showVendor=true,uniform=false){
-  const v=vendors.find(x=>x.id===p.v);
+  const v=vendors.find(x=>x.id===p.v)||{id:p.v,company:'Tienda',logo:'🏪'};
   const promo=p.prev?`<span class="promo-tag">-${Math.round((1-p.price/p.prev)*100)}%</span>`:'';
   if(uniform){
     return `<div class="card ucard" onclick="openProduct(${p.id})">
@@ -1993,17 +2034,17 @@ function discardVendor(id){
   state.vendorEditing=false;render();toast('Cambios descartados');
 }
 function editPrice(id){promptVal('Nuevo precio (S/ por kg)',products.find(p=>p.id===id).price,
-  `v=>{const n=parseFloat(v);const p=products.find(x=>x.id===${id});if(n>0){const promo=n<p.price;p.prev=promo?p.price:null;p.price=n;closeModal();render();toast(promo?'Precio rebajado · promoción activa':'Precio actualizado · sin promoción');}else{closeModal();toast('Precio inválido');}}`);}
+  `v=>{const n=parseFloat(v);const p=products.find(x=>x.id===${id});if(n>0){const promo=n<p.price;p.prev=promo?p.price:null;p.price=n;syncProduct(${id});closeModal();render();toast(promo?'Precio rebajado · promoción activa':'Precio actualizado · sin promoción');}else{closeModal();toast('Precio inválido');}}`);}
 function editDesc(id){promptVal('Descripción del producto',products.find(p=>p.id===id).desc,
-  `v=>{products.find(x=>x.id===${id}).desc=v;closeModal();render();toast('Descripción actualizada')}`);}
+  `v=>{products.find(x=>x.id===${id}).desc=v;syncProduct(${id});closeModal();render();toast('Descripción actualizada')}`);}
 function editEmoji(id){promptVal('Imagen (emoji) del producto',products.find(p=>p.id===id).emoji,
-  `v=>{const p=products.find(x=>x.id===${id});p.emoji=v||'📦';p.img=null;closeModal();render();toast('Emoji actualizado')}`);}
-function editImg(id){pickImage(d=>{products.find(x=>x.id===id).img=d;render();openProduct(id);toast('Imagen actualizada');});}
+  `v=>{const p=products.find(x=>x.id===${id});p.emoji=v||'📦';p.img=null;syncProduct(${id});closeModal();render();toast('Emoji actualizado')}`);}
+function editImg(id){pickImage(d=>{products.find(x=>x.id===id).img=d;syncProduct(id);render();openProduct(id);toast('Imagen actualizada');});}
 function editCat(id){
   const p=products.find(x=>x.id===id);
   modal(`<div class="modal" style="max-width:380px"><div class="modal-body">
     <h2 style="font-size:20px">Categoría del producto</h2>
-    <div class="catgrid" style="margin-top:12px">${CATEGORIES.map(c=>`<button class="catbox ${p.cat===c.id?'sel':''}" onclick="products.find(x=>x.id===${id}).cat='${c.id}';closeModal();render();toast('Categoría: ${c.name}')"><span class="catemoji" style="background:${pal(c.name.length)}">${c.emoji}</span><b>${c.name}</b></button>`).join('')}</div>
+    <div class="catgrid" style="margin-top:12px">${CATEGORIES.map(c=>`<button class="catbox ${p.cat===c.id?'sel':''}" onclick="products.find(x=>x.id===${id}).cat='${c.id}';syncProduct(${id});closeModal();render();toast('Categoría: ${c.name}')"><span class="catemoji" style="background:${pal(c.name.length)}">${c.emoji}</span><b>${c.name}</b></button>`).join('')}</div>
   </div></div>`);
 }
 /* Crear nuevo producto (vendedor) */
@@ -2039,8 +2080,11 @@ function createProduct(vendorId){
   const cat=$('#np_cat').value;
   if(!name){toast('Ingresa un nombre');return;}
   if(!(price>0)){toast('Ingresa un precio válido');return;}
-  products.push({id:pid++,v:vendorId,name,emoji,img:_npImg||null,price,prev:null,cat,desc:desc||'Sin descripción.',sales:0});
+  const _prod={id:pid++,v:vendorId,name,emoji,img:_npImg||null,price,prev:null,cat,desc:desc||'Sin descripción.',sales:0};
+  products.push(_prod);
   _npImg=null;closeModal();go('vendor',vendorId);toast('Producto publicado');
+  // guardar en Supabase para que todos los clientes lo vean
+  createCloudProduct(_prod).then(cid=>{ if(cid!=null) _prod.cloudId=cid; });
 }
 
 function pickImage(cb){
